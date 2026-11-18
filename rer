@@ -1,0 +1,421 @@
+// ==UserScript==
+// @name         Venom Ultimate – Adblock, Anti-Adblock Defeater, Popunder Killer & Timer Boost
+// @namespace    venom.ultimate
+// @version      3.0.0
+// @description  All-in-one powerhouse: blocks click-hijack popunders, destroys invisible overlays, defeats anti-adblock walls (SexTB, F4Stream, etc.), speeds up countdown timers 10x, skips shortlink steps, and cleans tracking links.
+// @match        http://*/*
+// @match        https://*/*
+// @run-at       document-start
+// @allFrames    true
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // In Tampermonkey with @grant none, window IS the page window.
+  // If run in a sandbox, unsafeWindow accesses the real page window.
+  const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  const D = W.document;
+  const H = (W.location && W.location.hostname ? W.location.hostname : '').replace(/^www\./, '').toLowerCase();
+
+  // 1. NEVER INTERFERE WITH REAL CAPTCHAS, CLOUDFLARE TURNSTILE, OR PAYMENT GATEWAYS
+  if (/(^|\.)(recaptcha\.net|hcaptcha\.com|challenges\.cloudflare\.com|accounts\.google\.com|paypal\.com|stripe\.com|appleid\.apple\.com)$/.test(H)) {
+    return;
+  }
+  if (/\/cdn-cgi\/|[?&]__cf_chl_/.test(W.location.href)) {
+    return; // Cloudflare challenge / waiting room: leave 100% untouched
+  }
+
+  // =========================================================================
+  // SECTION 1: UNIVERSAL ANTI-ADBLOCK DEFEATER (SexTB, F4Stream, StreamWish, etc.)
+  // =========================================================================
+
+  try {
+    // Standard anti-adblock variables checked by sites
+    W.canRunAds = true;
+    W.isAdBlocked = false;
+    W.adBlockDetected = false;
+    W.adblock = false;
+    W.hasAdBlocker = false;
+    W.adbDetected = false;
+    W.adsAllowed = true;
+    W.adsEnabled = true;
+
+    // SexTB-specific anti-adblock pre-seeding (it caches 'sxab' in sessionStorage for 10 min)
+    if (/(^|\.)sextb\.net$/.test(H)) {
+      try {
+        W.sessionStorage.setItem('sxab', JSON.stringify({ b: false, t: Date.now() }));
+      } catch (e) {}
+    }
+
+    // Stub common detector objects (FuckAdBlock, BlockAdBlock, SniffAdBlock)
+    function StubDetector() {}
+    StubDetector.prototype.onDetected = function () { return this; };
+    StubDetector.prototype.onNotDetected = function (cb) { if (typeof cb === 'function') setTimeout(cb, 5); return this; };
+    StubDetector.prototype.on = function (detected, cb) { if (!detected && typeof cb === 'function') setTimeout(cb, 5); return this; };
+    StubDetector.prototype.check = function () { return true; };
+    StubDetector.prototype.setOption = function () { return this; };
+    StubDetector.prototype.emitEvent = function () { return this; };
+    StubDetector.prototype.clearEvent = function () { return this; };
+
+    ['FuckAdBlock', 'BlockAdBlock', 'SniffAdBlock'].forEach(name => {
+      try { W[name] = StubDetector; } catch (e) {}
+    });
+    ['fuckAdBlock', 'blockAdBlock', 'sniffAdBlock'].forEach(name => {
+      try { W[name] = new StubDetector(); } catch (e) {}
+    });
+  } catch (e) {}
+
+  // Defeat size-based bait checks (sites create an element like <div class="adsbox"> and check if offsetHeight === 0)
+  const BAIT_PATTERN = /(^|[\s_-])(adsbox|ads-box|ad-banner|banner-ads|ad-placement|ad-slot|ads-container|afs_ads|advertisement|adsbygoogle|doubleclick|textads|pub_300x250|ad_unit)($|[\s_-])/i;
+  function isBaitElement(el) {
+    try {
+      return BAIT_PATTERN.test(((typeof el.className === 'string' ? el.className : '') + ' ' + (el.id || '')));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  ['offsetHeight', 'offsetWidth', 'clientHeight', 'clientWidth'].forEach(prop => {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(W.HTMLElement.prototype, prop) || Object.getOwnPropertyDescriptor(W.Element.prototype, prop);
+      if (desc && desc.get) {
+        Object.defineProperty(desc === Object.getOwnPropertyDescriptor(W.HTMLElement.prototype, prop) ? W.HTMLElement.prototype : W.Element.prototype, prop, {
+          get: function () {
+            const val = desc.get.call(this);
+            return (val === 0 && isBaitElement(this)) ? 150 : val;
+          },
+          configurable: true
+        });
+      }
+    } catch (e) {}
+  });
+
+  // Override getBoundingClientRect for bait elements
+  try {
+    const origGBCR = W.Element.prototype.getBoundingClientRect;
+    W.Element.prototype.getBoundingClientRect = function () {
+      const r = origGBCR.call(this);
+      if ((r.width === 0 || r.height === 0) && isBaitElement(this)) {
+        return { x: r.x, y: r.y, top: r.top, left: r.left, width: 150, height: 150, right: r.left + 150, bottom: r.top + 150, toJSON: function () {} };
+      }
+      return r;
+    };
+  } catch (e) {}
+
+  // Suppress "failed to load ad" error events so anti-adblock scripts think the ad script loaded
+  W.addEventListener('error', function (e) {
+    const t = e.target;
+    if (!t || t === W || !t.tagName) return;
+    const src = t.src || t.href || '';
+    if (/ads?|banner|pop|track|analytics|doubleclick|syndication/i.test(src)) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      setTimeout(() => {
+        try { t.dispatchEvent(new Event('load')); } catch (err) {}
+      }, 0);
+    }
+  }, true);
+
+  // Wrap fetch and XMLHttpRequest to return 200 OK for blocked ad probes
+  try {
+    const origFetch = W.fetch;
+    if (origFetch) {
+      W.fetch = function (input) {
+        const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+        return origFetch.apply(this, arguments).catch(err => {
+          if (/ads?|banner|pop|doubleclick|syndication|adblock/i.test(url)) {
+            return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+          }
+          throw err;
+        });
+      };
+    }
+  } catch (e) {}
+
+  // =========================================================================
+  // SECTION 2: BULLETPROOF POPUP, POPUNDER & INVISIBLE CLICK-OVERLAY KILLER
+  // =========================================================================
+
+  const AD_HOST_RE = /(popads|popcash|adsterra|exoclick|trafficjunky|juicyads|highperformanceformat|effectivegatecpm|profitablegatecpm|clickadu|adcash|hilltopads|onclkds|monetag|tsyndicate|yllix|magsrv|realsrv|ero-advertising|adtng|trafficstars|onclickads|propellerads|bidvertiser)/i;
+  const ALLOWED_OAUTH = /(accounts\.google\.com|facebook\.com|discord\.com\/api\/oauth2|twitter\.com\/i\/oauth|appleid\.apple\.com|github\.com\/login\/oauth)/i;
+
+  // Intercept window.open completely
+  const origOpen = W.open;
+  W.open = function (url) {
+    const strUrl = String(url || '');
+    let targetHost = '';
+    try {
+      targetHost = new URL(strUrl, W.location.href).hostname.toLowerCase();
+    } catch (e) {}
+
+    // Allow legitimate sign-in / OAuth windows
+    if (ALLOWED_OAUTH.test(strUrl) || ALLOWED_OAUTH.test(targetHost)) {
+      return origOpen.apply(W, arguments);
+    }
+
+    // BLOCK if destination is a known ad network OR if opening a third-party site without explicit whitelist
+    if (AD_HOST_RE.test(targetHost) || AD_HOST_RE.test(strUrl) || (targetHost && targetHost !== H && !ALLOWED_OAUTH.test(targetHost))) {
+      console.warn('[Venom Ultimate] Blocked popunder/popup to:', strUrl);
+      return { closed: true, close: function () {}, focus: function () {}, blur: function () {}, postMessage: function () {}, document: {}, location: {} };
+    }
+
+    return origOpen.apply(W, arguments);
+  };
+
+  // Destroy invisible full-screen click-trap overlays placed over video players
+  function killClickTraps() {
+    if (!D.body) return;
+    const vw = W.innerWidth || 1, vh = W.innerHeight || 1;
+    const candidates = D.querySelectorAll('div, a, span');
+    for (let i = 0; i < candidates.length; i++) {
+      const el = candidates[i];
+      if (el.tagName === 'VIDEO' || el.tagName === 'IFRAME') continue;
+
+      const cs = W.getComputedStyle(el);
+      if (cs.position === 'fixed' || cs.position === 'absolute') {
+        const z = parseInt(cs.zIndex, 10) || 0;
+        const rect = el.getBoundingClientRect();
+        const area = (rect.width * rect.height) / (vw * vh);
+
+        // Overlay that covers more than 35% of the screen
+        if (area >= 0.35 && z >= 50) {
+          const isTransparent = parseFloat(cs.opacity) <= 0.05 || cs.backgroundColor === 'rgba(0, 0, 0, 0)' || cs.visibility === 'hidden';
+          const text = (el.innerText || '').trim();
+
+          // If it has no text, or is transparent, or contains ad links -> DESTROY IT!
+          if (isTransparent || text.length === 0 || AD_HOST_RE.test(el.outerHTML || '')) {
+            el.remove();
+          }
+        }
+      }
+    }
+  }
+
+  // Prevent dynamic click-hijacking on the document
+  W.addEventListener('click', function (e) {
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (a) {
+      const href = a.getAttribute('href') || '';
+      if (AD_HOST_RE.test(href)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        console.warn('[Venom Ultimate] Blocked click hijack link:', href);
+      }
+    }
+  }, true);
+
+  // =========================================================================
+  // SECTION 3: 10x COUNTDOWN TIMER ACCELERATION (Shortlink & Waiting Skip)
+  // =========================================================================
+
+  const SPEED_FACTOR = 10;
+  const origSetTimeout = W.setTimeout;
+  const origSetInterval = W.setInterval;
+  const origDateNow = W.Date.now;
+  const origPerfNow = W.performance ? W.performance.now.bind(W.performance) : null;
+
+  let timeGain = 0;
+  let lastRealTime = origDateNow.call(W.Date);
+
+  // Detect if a real CAPTCHA is currently visible on the page
+  const CAPTCHA_SELECTORS = '.cf-turnstile, iframe[src*="challenges.cloudflare.com"], .g-recaptcha, iframe[src*="recaptcha"], .h-captcha, iframe[src*="hcaptcha"]';
+  function isCaptchaActive() {
+    try {
+      const frames = D.querySelectorAll(CAPTCHA_SELECTORS);
+      for (let i = 0; i < frames.length; i++) {
+        const r = frames[i].getBoundingClientRect();
+        if (r.width > 30 && r.height > 20 && W.getComputedStyle(frames[i]).visibility !== 'hidden') {
+          return true; // Don't speed up while user solves a real captcha
+        }
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  // Accelerate timer delays between 300ms and 45000ms
+  function scaleDelay(d) {
+    if (isCaptchaActive()) return d;
+    if (typeof d === 'number' && d >= 300 && d <= 45000) {
+      return Math.max(15, Math.floor(d / SPEED_FACTOR));
+    }
+    return d;
+  }
+
+  W.setTimeout = function (fn, delay) {
+    const args = Array.prototype.slice.call(arguments, 2);
+    const scaled = scaleDelay(+delay || 0);
+    return origSetTimeout.call(W, function () {
+      if (typeof fn === 'function') fn.apply(W, args);
+      else if (typeof fn === 'string') (new Function(fn))();
+    }, scaled);
+  };
+
+  W.setInterval = function (fn, delay) {
+    const args = Array.prototype.slice.call(arguments, 2);
+    const scaled = scaleDelay(+delay || 0);
+    return origSetInterval.call(W, function () {
+      if (typeof fn === 'function') fn.apply(W, args);
+      else if (typeof fn === 'string') (new Function(fn))();
+    }, scaled);
+  };
+
+  // Speed up Date.now() smoothly
+  W.Date.now = function () {
+    const now = origDateNow.call(W.Date);
+    if (!isCaptchaActive()) {
+      timeGain += (now - lastRealTime) * (SPEED_FACTOR - 1);
+    }
+    lastRealTime = now;
+    return now + timeGain;
+  };
+
+  if (origPerfNow) {
+    W.performance.now = function () {
+      return origPerfNow() * (isCaptchaActive() ? 1 : SPEED_FACTOR);
+    };
+  }
+
+  // =========================================================================
+  // SECTION 4: LINK CLEANER & REDIRECT UNWRAPPER
+  // =========================================================================
+
+  const TRACKING_PARAMS = /^(utm_[a-z0-9_]+|fbclid|gclid|gclsrc|dclid|gbraid|wbraid|msclkid|yclid|twclid|ttclid|igshid|mc_cid|mc_eid|_hsenc|_hsmi|ref_src|srsltid|_ga|_gl)$/i;
+
+  function cleanUrl(href) {
+    try {
+      const u = new URL(href, W.location.href);
+      if (!/^https?:$/.test(u.protocol) || !u.search) return href;
+
+      // Unwrap known redirect wrappers
+      if (/(^|\.)google\.[a-z.]+$/.test(u.hostname) && u.pathname === '/url' && u.searchParams.has('q')) {
+        return cleanUrl(u.searchParams.get('q'));
+      }
+      if (/(^|\.)youtube\.com$/.test(u.hostname) && u.pathname === '/redirect' && u.searchParams.has('q')) {
+        return cleanUrl(u.searchParams.get('q'));
+      }
+      if (/(^|\.)facebook\.com$/.test(u.hostname) && u.pathname === '/l.php' && u.searchParams.has('u')) {
+        return cleanUrl(u.searchParams.get('u'));
+      }
+      if (/(^|\.)duckduckgo\.com$/.test(u.hostname) && u.pathname.startsWith('/l/') && u.searchParams.has('uddg')) {
+        return cleanUrl(u.searchParams.get('uddg'));
+      }
+
+      // Strip tracking query parameters
+      let changed = false;
+      for (const k of Array.from(u.searchParams.keys())) {
+        if (TRACKING_PARAMS.test(k)) {
+          u.searchParams.delete(k);
+          changed = true;
+        }
+      }
+      return changed ? u.href : href;
+    } catch (e) {
+      return href;
+    }
+  }
+
+  // Clean clicked links on the fly
+  D.addEventListener('mousedown', function (e) {
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (a && /^https?:/i.test(a.href)) {
+      if (a.hasAttribute('ping')) a.removeAttribute('ping');
+      const cleaned = cleanUrl(a.href);
+      if (cleaned !== a.href) a.href = cleaned;
+    }
+  }, true);
+
+  // Clean the current address bar URL
+  try {
+    const cur = cleanUrl(W.location.href);
+    if (cur !== W.location.href) {
+      W.history.replaceState(W.history.state, '', cur);
+    }
+  } catch (e) {}
+
+  // =========================================================================
+  // SECTION 5: SHORTLINK STEP AUTOMATOR (GPlinks & Auto-Clicks)
+  // =========================================================================
+
+  function handleShortlinks() {
+    // GPlinks: Skip paywall / subscription prompt -> auto-select "Continue with ads"
+    if (/gplinks\.(co|com)$/.test(H)) {
+      const skipBtn = D.querySelector('a[href*="skip_sub=1"]');
+      if (skipBtn) {
+        W.location.replace(skipBtn.href);
+        return;
+      }
+      if (!W.location.search.includes('skip_sub=1') && (D.body && /Continue with ads/i.test(D.body.textContent || ''))) {
+        const u = new URL(W.location.href);
+        u.searchParams.set('skip_sub', '1');
+        W.location.replace(u.href);
+        return;
+      }
+    }
+
+    // Auto-click "Verify" and "Continue" buttons on step countdown pages
+    const text = (D.body ? (D.body.innerText || D.body.textContent || '') : '').slice(0, 4000);
+    if (/Verify\s*&\s*Scroll down to Continue|Please wait\s*\d+\s*Seconds?/i.test(text)) {
+      const buttons = D.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button]');
+      for (let i = 0; i < buttons.length; i++) {
+        const btn = buttons[i];
+        const val = ((btn.value || btn.textContent) || '').trim();
+        if (/^verify$/i.test(val) && !btn.disabled) {
+          btn.click();
+          break;
+        }
+        if (/^(continue|get\s*link|click here to continue)$/i.test(val) && !btn.disabled) {
+          W.scrollTo(0, D.documentElement.scrollHeight);
+          setTimeout(() => btn.click(), 500);
+          break;
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // SECTION 6: UNLOCK SCROLL & REMOVE BLUR FILTERS
+  // =========================================================================
+
+  function unlockPage() {
+    [D.documentElement, D.body].forEach(el => {
+      if (!el) return;
+      const cs = W.getComputedStyle(el);
+      if (cs.overflow === 'hidden' || cs.overflowY === 'hidden') {
+        el.style.setProperty('overflow', 'auto', 'important');
+        el.style.setProperty('overflow-y', 'auto', 'important');
+      }
+      if (cs.filter && cs.filter !== 'none') {
+        el.style.setProperty('filter', 'none', 'important');
+      }
+    });
+
+    // Remove fixed full-screen backdrops
+    const backdrops = D.querySelectorAll('[class*="backdrop" i], [class*="modal-backdrop" i], [class*="adblock-overlay" i]');
+    for (let i = 0; i < backdrops.length; i++) {
+      backdrops[i].remove();
+    }
+  }
+
+  // =========================================================================
+  // INITIALIZATION & LIFECYCLE
+  // =========================================================================
+
+  function init() {
+    killClickTraps();
+    unlockPage();
+    handleShortlinks();
+
+    // Re-check periodically for dynamically injected overlays or step buttons
+    origSetInterval.call(W, killClickTraps, 1000);
+    origSetInterval.call(W, unlockPage, 1500);
+    origSetInterval.call(W, handleShortlinks, 1000);
+  }
+
+  if (D.readyState === 'loading') {
+    D.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();
