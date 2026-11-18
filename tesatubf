@@ -1,0 +1,385 @@
+// ==UserScript==
+// @name         Venom Ultimate – SexTB Player Fix, Popunder Killer & Countdown Booster
+// @namespace    venom.ultimate
+// @version      3.2.0
+// @description  Full fix for SexTB adblock detection, 10x countdown speedup, popunder blocker, and shortlink automation. Built specifically for mobile (Quetta / Kiwi) & desktop (Tampermonkey / Violentmonkey).
+// @match        http://*/*
+// @match        https://*/*
+// @run-at       document-start
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // Support both page world (unsafeWindow) and content script world
+  const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  const D = document;
+  const H = (location && location.hostname ? location.hostname : '').replace(/^www\./, '').toLowerCase();
+
+  // 1. NEVER INTERFERE WITH CAPTCHA / CLOUDFLARE / PAYMENT CHECKOUTS
+  if (/(^|\.)(recaptcha\.net|hcaptcha\.com|challenges\.cloudflare\.com|accounts\.google\.com|paypal\.com|stripe\.com)$/.test(H)) return;
+  if (/\/cdn-cgi\/|[?&]__cf_chl_/.test(location.href)) return;
+
+  // VISUAL TOAST HELPER (Shows you that Venom is working!)
+  function toast(msg, color) {
+    try {
+      if (!D.body) return;
+      let t = D.getElementById('__venom_toast');
+      if (!t) {
+        t = D.createElement('div');
+        t.id = '__venom_toast';
+        t.style.cssText = 'all:initial;position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:' + (color || '#14b878') + ';color:#000;font:700 13px system-ui,-apple-system,sans-serif;padding:8px 16px;border-radius:20px;z-index:2147483647;pointer-events:none;box-shadow:0 4px 15px rgba(0,0,0,0.4);opacity:0.95;transition:opacity 0.3s';
+        D.body.appendChild(t);
+      }
+      t.textContent = 'Venom: ' + msg;
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => { if (t) t.remove(); }, 2800);
+    } catch (e) {}
+  }
+
+  // =========================================================================
+  // SECTION 1: SEXTB ANTI-ADBLOCK DEFEAT (Restored from Venom-AdFix)
+  // =========================================================================
+
+  // SexTB caches adblock status in sessionStorage for 10 min
+  if (/(^|\.)sextb\.net$/.test(H)) {
+    try {
+      sessionStorage.setItem('sxab', JSON.stringify({ b: false, t: Date.now() }));
+    } catch (e) {}
+  }
+
+  // Global anti-adblock variables
+  try {
+    W.canRunAds = true;
+    W.isAdBlocked = false;
+    W.adBlockDetected = false;
+    W.adblock = false;
+    W.adsAllowed = true;
+    W.adsEnabled = true;
+
+    function StubBlocker() {}
+    StubBlocker.prototype.onDetected = function () { return this; };
+    StubBlocker.prototype.onNotDetected = function (f) { if (typeof f === 'function') setTimeout(f, 0); return this; };
+    StubBlocker.prototype.on = function (d, f) { if (!d && typeof f === 'function') setTimeout(f, 0); return this; };
+    StubBlocker.prototype.check = function () { return true; };
+    ['FuckAdBlock', 'BlockAdBlock', 'SniffAdBlock'].forEach(n => { W[n] = StubBlocker; });
+    ['fuckAdBlock', 'blockAdBlock', 'sniffAdBlock'].forEach(n => { W[n] = new StubBlocker(); });
+  } catch (e) {}
+
+  // 1b. UN-BAIT: If Quetta's built-in ad blocker hid a bait element, forcibly UNHIDE it so sexTB doesn't trigger!
+  const BAIT_RE = /(^|[\s_-])(ads?|adsbox|ad-?banner|banner-?ads?|advert\w*|ad-?placement|ad-?unit|adsbygoogle|pub[_-]?\d+x\d+|text-?ads?|sponsor\w*|ad-?slot)([\s_-]|$)/i;
+  function unbait(el) {
+    try {
+      if (!el || el.nodeType !== 1 || el.tagName === 'IFRAME' || el.tagName === 'SCRIPT') return;
+      const k = String(typeof el.className === 'string' ? el.className : '') + ' ' + (el.id || '');
+      if (!BAIT_RE.test(k) || el.children.length || (el.textContent || '').trim()) return;
+      const cs = W.getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') {
+        el.style.setProperty('display', 'block', 'important');
+        el.style.setProperty('visibility', 'visible', 'important');
+        el.style.setProperty('opacity', '1', 'important');
+        el.style.setProperty('height', '100px', 'important');
+        el.style.setProperty('width', '100px', 'important');
+      }
+    } catch (e) {}
+  }
+
+  // 1c. Fake Element dimensions for size-based detectors
+  ['offsetHeight', 'offsetWidth', 'clientHeight', 'clientWidth'].forEach(prop => {
+    try {
+      const d = Object.getOwnPropertyDescriptor(W.HTMLElement.prototype, prop) || Object.getOwnPropertyDescriptor(W.Element.prototype, prop);
+      if (d && d.get) {
+        Object.defineProperty(d === Object.getOwnPropertyDescriptor(W.HTMLElement.prototype, prop) ? W.HTMLElement.prototype : W.Element.prototype, prop, {
+          get: function () {
+            const v = d.get.call(this);
+            return (v === 0 && BAIT_RE.test((typeof this.className === 'string' ? this.className : '') + ' ' + (this.id || ''))) ? 120 : v;
+          },
+          configurable: true
+        });
+      }
+    } catch (e) {}
+  });
+
+  // 1d. Turn blocked ad script/image error events into successful 'load' events
+  W.addEventListener('error', function (e) {
+    const t = e.target;
+    if (!t || t === W || !t.tagName) return;
+    const u = t.currentSrc || t.src || t.href || '';
+    if (/ads?|banner|pop|track|analytics|histats|doubleclick|syndication/i.test(u)) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      setTimeout(() => { try { t.dispatchEvent(new Event('load')); } catch (x) {} }, 0);
+    }
+  }, true);
+
+  // 1e. Fake fetch / XHR for ad probe checks
+  try {
+    const rf = W.fetch;
+    if (rf) {
+      W.fetch = function (u) {
+        return rf.apply(this, arguments).catch(err => {
+          const urlStr = String((u && u.url) || u || '');
+          if (/ads?|banner|pop|histats|doubleclick/i.test(urlStr)) {
+            return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+          }
+          throw err;
+        });
+      };
+    }
+  } catch (e) {}
+
+  // 1f. AUTO-RECHECK & SERVER RELOAD (F4 / SW / DD) ON SEXTB
+  function autoFixSexTB() {
+    if (!/(^|\.)sextb\.net$/.test(H)) return;
+    const pageText = (D.body && D.body.innerText) || '';
+    if (/Ad\s*blocker\s*detected|disable\s*your\s*ad\s*blocker/i.test(pageText)) {
+      // Find "I've disabled it" or "Check again" button and click it
+      const btns = D.querySelectorAll('button, a, [role="button"], .btn');
+      for (let i = 0; i < btns.length; i++) {
+        const txt = (btns[i].textContent || '').trim();
+        if (/i['’]?ve\s+disabled\s+it|check\s+again|still\s+blocked/i.test(txt)) {
+          btns[i].click();
+          toast('Clicked "Check Again"', '#38bdf8');
+          return;
+        }
+      }
+
+      // If check button didn't reload player, click server switch tab (F4 or SW)
+      const serverTabs = D.querySelectorAll('a, button, [role="button"], .btn, div');
+      for (let i = 0; i < serverTabs.length; i++) {
+        const txt = (serverTabs[i].textContent || '').trim();
+        if (/^\s*(F4|SW|DD|FL)\s*$/i.test(txt) && serverTabs[i].offsetParent !== null) {
+          serverTabs[i].click();
+          toast('Reloading player via ' + txt + ' server...', '#38bdf8');
+          break;
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // SECTION 2: BULLETPROOF POPUP & INVISIBLE OVERLAY KILLER
+  // =========================================================================
+
+  const AD_HOSTS = /(popads|popcash|adsterra|exoclick|trafficjunky|juicyads|highperformanceformat|effectivegatecpm|profitablegatecpm|clickadu|adcash|hilltopads|onclkds|monetag|tsyndicate|yllix|magsrv|realsrv|ero-advertising|adtng|trafficstars|onclickads|propellerads|bidvertiser)/i;
+  const ALLOWED_OAUTH = /(accounts\.google\.com|facebook\.com|discord\.com\/api\/oauth2|twitter\.com\/i\/oauth|appleid\.apple\.com|github\.com\/login\/oauth)/i;
+
+  const realOpen = W.open;
+  W.open = function (url) {
+    const str = String(url || '');
+    let h = '';
+    try { h = new URL(str, location.href).hostname.toLowerCase(); } catch (e) {}
+
+    if (ALLOWED_OAUTH.test(str) || ALLOWED_OAUTH.test(h)) return realOpen.apply(W, arguments);
+
+    // If destination is an ad network or different host without whitelist -> BLOCK
+    if (AD_HOSTS.test(h) || AD_HOSTS.test(str) || (h && h !== H && !ALLOWED_OAUTH.test(h))) {
+      toast('Blocked an ad popup', '#f87171');
+      return { closed: true, close() {}, focus() {}, blur() {}, document: {}, location: {} };
+    }
+    return realOpen.apply(W, arguments);
+  };
+
+  // Sweep and kill transparent click-hijacking overlays
+  function sweepOverlays() {
+    if (!D.body) return;
+    const vw = W.innerWidth || 1, vh = W.innerHeight || 1;
+    const els = D.querySelectorAll('body > *, body > * > *');
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      if (el.tagName === 'VIDEO' || el.tagName === 'IFRAME') continue;
+      try {
+        const cs = W.getComputedStyle(el);
+        if (cs.position !== 'fixed' && cs.position !== 'absolute') continue;
+        const r = el.getBoundingClientRect();
+        if (r.width >= vw * 0.7 && r.height >= vh * 0.5) {
+          const z = parseInt(cs.zIndex, 10) || 0;
+          const text = (el.textContent || '').trim();
+          if (z >= 100 && (text.length < 20 || parseFloat(cs.opacity) <= 0.05 || cs.backgroundColor === 'rgba(0, 0, 0, 0)')) {
+            el.remove();
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // =========================================================================
+  // SECTION 3: 10x COUNTDOWN TIMER SPEEDUP (Restored from Venom-Shield)
+  // =========================================================================
+
+  const SPEED = 10;
+  const RT = { st: W.setTimeout, si: W.setInterval, ct: W.clearTimeout, ci: W.clearInterval };
+  const rnow = Date.now.bind(Date);
+  const reg = new Map();
+  let nid = 1000000, fast = false, wanted = false, offT = 0, wr = 0;
+
+  const vnow = () => fast ? Math.floor(rnow() + offT + (rnow() - wr) * (SPEED - 1)) : rnow() + offT;
+  const inRange = d => d >= 300 && d <= 45000;
+  const eff = d => (fast && inRange(d)) ? Math.max(15, Math.floor(d / SPEED)) : d;
+
+  function startTimer(id, e, leftV) {
+    const d = leftV == null ? e.delay : leftV;
+    e.due = vnow() + d;
+    e.h = (e.iv ? RT.si : RT.st).call(W, function () {
+      if (!e.iv) reg.delete(id); else e.due = vnow() + e.delay;
+      return e.fn.apply(W, e.args);
+    }, eff(e.iv ? e.delay : d));
+    reg.set(id, e);
+  }
+
+  W.setTimeout = function (fn, delay) {
+    if (typeof fn !== 'function') return RT.st.apply(W, arguments);
+    delay = +delay || 0;
+    const id = ++nid;
+    startTimer(id, { iv: false, fn, args: [].slice.call(arguments, 2), delay }, delay);
+    return id;
+  };
+
+  W.setInterval = function (fn, delay) {
+    if (typeof fn !== 'function') return RT.si.apply(W, arguments);
+    delay = +delay || 0;
+    const id = ++nid;
+    startTimer(id, { iv: true, fn, args: [].slice.call(arguments, 2), delay }, delay);
+    return id;
+  };
+
+  W.clearTimeout = function (id) {
+    const e = reg.get(id);
+    if (e) { (e.iv ? RT.ci : RT.ct).call(W, e.h); reg.delete(id); } else RT.ct.call(W, id);
+  };
+  W.clearInterval = W.clearTimeout;
+
+  // Real Captcha detection
+  const CAP = '.cf-turnstile, iframe[src*="challenges.cloudflare.com"], .g-recaptcha, iframe[src*="recaptcha"], .h-captcha, iframe[src*="hcaptcha"]';
+  function hasActiveCaptcha() {
+    const els = D.querySelectorAll(CAP);
+    for (let i = 0; i < els.length; i++) {
+      const r = els[i].getBoundingClientRect();
+      if (r.width > 40 && r.height > 20 && W.getComputedStyle(els[i]).visibility !== 'hidden') return true;
+    }
+    return false;
+  }
+
+  function setFast(on) {
+    if (on === fast) return;
+    if (on) { wr = rnow(); fast = true; }
+    else { offT += (rnow() - wr) * (SPEED - 1); fast = false; }
+    reg.forEach((e, id) => {
+      if (!inRange(e.delay)) return;
+      (e.iv ? RT.ci : RT.ct).call(W, e.h);
+      startTimer(id, e, Math.max(0, e.due - vnow()));
+    });
+  }
+
+  function boost(reason) {
+    if (hasActiveCaptcha()) return;
+    setFast(true);
+    if (!wanted) {
+      wanted = true;
+      toast('Countdown Boost x10 Active! (' + reason + ')');
+    }
+  }
+
+  // Detect countdown patterns on shortlink and download pages
+  const CD_REGEX = /(please\s+)?wait\s*(for\s*)?\d+|\d+\s*(seconds?|secs?)\s*(left|remaining|to\s+continue)|(continue|redirect|skip|proceed|download)[^.\n]{0,25}\bin\s*\d+|get\s*link\s*in|your\s+link\s+is\s+ready/i;
+  function checkCountdowns() {
+    if (!D.body) return;
+    if (hasActiveCaptcha()) {
+      if (fast) { setFast(false); toast('Boost paused for verification', '#fbbf24'); }
+      return;
+    }
+    const txt = (D.body.innerText || D.body.textContent || '').slice(0, 5000);
+    if (CD_REGEX.test(txt)) {
+      boost('Countdown page');
+      return;
+    }
+    const timerEls = D.querySelectorAll('[id*="timer" i],[class*="timer" i],[id*="count" i],[class*="count" i]');
+    for (let i = 0; i < timerEls.length; i++) {
+      if (/^\s*\d{1,3}\s*(s|sec|seconds)?\s*$/i.test(timerEls[i].textContent || '')) {
+        boost('Timer element');
+        return;
+      }
+    }
+  }
+
+  // =========================================================================
+  // SECTION 4: SHORTLINKS & GPLINKS AUTOMATION
+  // =========================================================================
+
+  function autoStep() {
+    // GPlinks paywall skip
+    if (/gplinks\.(co|com)$/.test(H)) {
+      const skip = D.querySelector('a[href*="skip_sub=1"]');
+      if (skip) { location.replace(skip.href); return; }
+      if (!location.search.includes('skip_sub=1') && (D.body && /Continue with ads/i.test(D.body.textContent || ''))) {
+        const u = new URL(location.href);
+        u.searchParams.set('skip_sub', '1');
+        location.replace(u.href);
+        return;
+      }
+    }
+
+    // Auto-click Verify / Continue
+    const text = (D.body ? (D.body.innerText || '') : '').slice(0, 4000);
+    if (/Verify\s*&\s*Scroll down to Continue|Please wait\s*\d+\s*Seconds?/i.test(text)) {
+      const m = text.match(/Please\s*wait\s*(\d+)\s*Seconds?/i);
+      if (m && +m[1] > 0) return; // Still counting
+      const btns = D.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button]');
+      for (let i = 0; i < btns.length; i++) {
+        const val = ((btns[i].value || btns[i].textContent) || '').trim();
+        if (/^verify$/i.test(val) && !btns[i].disabled) {
+          btns[i].click();
+          toast('Clicked VERIFY');
+          break;
+        }
+        if (/^(continue|get\s*link|click here to continue)$/i.test(val) && !btns[i].disabled) {
+          W.scrollTo(0, D.documentElement.scrollHeight);
+          setTimeout(() => { btns[i].click(); toast('Clicked CONTINUE'); }, 600);
+          break;
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // RUNTIME LOOP & MUTATION OBSERVER
+  // =========================================================================
+
+  function init() {
+    sweepOverlays();
+    checkCountdowns();
+    autoFixSexTB();
+    autoStep();
+
+    // Observe dynamically created bait or alert boxes
+    try {
+      new MutationObserver(function (ms) {
+        ms.forEach(function (m) {
+          if (m.type === 'attributes') unbait(m.target);
+          else m.addedNodes.forEach(function (n) {
+            unbait(n);
+            if (n.querySelectorAll) n.querySelectorAll('[class],[id]').forEach(unbait);
+          });
+        });
+      }).observe(D, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden'] });
+    } catch (e) {}
+
+    // Polling intervals for mobile browsers
+    RT.si.call(W, function () {
+      sweepOverlays();
+      checkCountdowns();
+      autoFixSexTB();
+      autoStep();
+    }, 1200);
+  }
+
+  if (D.readyState === 'loading') {
+    D.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();
