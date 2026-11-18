@@ -1,0 +1,138 @@
+// ==UserScript==
+// @name         Venom Shield v2.0 – Ultimate Adblock, Anti-Anti-Adblock & Popunder Killer
+// @namespace    venom.shield
+// @version      2.0.0
+// @description  Blocks all click-hijacking popunders, destroys invisible click overlays, bypasses anti-adblock walls, unlocks scrolling, and neutralizes ad checks across all sites & iframes.
+// @match        http://*/*
+// @match        https://*/*
+// @run-at       document-start
+// @allFrames    true
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// ==/UserScript==
+
+(function () {
+  'use strict';
+  const W = window, D = document, H = location.hostname.replace(/^www\./, '').toLowerCase();
+
+  // Never touch real captcha verification or payment processors
+  if (/(^|\.)(recaptcha\.net|hcaptcha\.com|challenges\.cloudflare\.com|accounts\.google\.com|paypal\.com|stripe\.com)$/.test(H)) return;
+  if (/\/cdn-cgi\/|[?&]__cf_chl_/.test(location.href)) return;
+
+  // 1. UNIVERSAL ANTI-ADBLOCK NEUTRALIZATION
+  try {
+    W.canRunAds = true;
+    W.isAdBlocked = false;
+    W.adBlockDetected = false;
+    W.adblock = false;
+    W.adsAllowed = true;
+    W.adsEnabled = true;
+
+    // Site-specific cache pre-seeding (e.g., sextb.net anti-adblock check)
+    if (/(^|\.)sextb\.net$/.test(H)) {
+      try { sessionStorage.setItem('sxab', JSON.stringify({ b: false, t: Date.now() })); } catch (e) {}
+    }
+
+    // Fake detector classes/constructors
+    function DummyBlocker() {}
+    DummyBlocker.prototype.onDetected = function () { return this; };
+    DummyBlocker.prototype.onNotDetected = function (fn) { if (typeof fn === 'function') setTimeout(fn, 10); return this; };
+    DummyBlocker.prototype.on = function (detected, fn) { if (!detected && typeof fn === 'function') setTimeout(fn, 10); return this; };
+    DummyBlocker.prototype.check = function () { return true; };
+    ['FuckAdBlock', 'BlockAdBlock', 'SniffAdBlock'].forEach(n => { W[n] = DummyBlocker; });
+    ['fuckAdBlock', 'blockAdBlock', 'sniffAdBlock'].forEach(n => { W[n] = new DummyBlocker(); });
+  } catch (e) {}
+
+  // 2. FAKE ELEMENT SIZES FOR AD BAIT (Anti-Adblock bait check defeat)
+  const BAIT_RE = /(adsbox|ad-banner|banner-ads|ad-placement|ad-slot|ad-container|advertisement|adsbygoogle|doubleclick)/i;
+  ['offsetHeight', 'offsetWidth', 'clientHeight', 'clientWidth'].forEach(prop => {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, prop);
+      if (desc && desc.get) {
+        Object.defineProperty(HTMLElement.prototype, prop, {
+          get: function () {
+            const val = desc.get.call(this);
+            if (val === 0 && (BAIT_RE.test(this.className || '') || BAIT_RE.test(this.id || ''))) {
+              return 150; // report natural size so bait checks think the ad loaded
+            }
+            return val;
+          },
+          configurable: true
+        });
+      }
+    } catch (e) {}
+  });
+
+  // 3. FAKE SCRIPT & IMAGE LOAD SUCCESS (Prevents "Failed to load ad" detection)
+  W.addEventListener('error', function (e) {
+    const t = e.target;
+    if (!t || t === W || !t.tagName) return;
+    const url = t.src || t.href || '';
+    if (/ad|banner|pop|track|analytics/i.test(url)) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      setTimeout(() => { try { t.dispatchEvent(new Event('load')); } catch (err) {} }, 0);
+    }
+  }, true);
+
+  // 4. REAL POPUP & POPUNDER KILLER (Inspects Destination Host)
+  const realOpen = W.open;
+  const ALLOWED_POPUPS = /(accounts\.google\.com|facebook\.com|discord\.com\/api\/oauth2|twitter\.com\/i\/oauth)/i;
+  const AD_DOMAINS = /(popads|popcash|adsterra|exoclick|trafficjunky|juicyads|highperformanceformat|effectivegatecpm|profitablegatecpm|clickadu|adcash|hilltopads|onclkds|monetag)/i;
+
+  W.open = function (url) {
+    let targetHost = '';
+    try { targetHost = new URL(url, location.href).hostname; } catch (e) {}
+
+    // Allow legitimate OAuth popups
+    if (ALLOWED_POPUPS.test(url || '')) return realOpen.apply(W, arguments);
+
+    // If destination is an ad domain OR third-party without proper user target -> BLOCK IT!
+    if (AD_DOMAINS.test(targetHost) || (targetHost && targetHost !== location.hostname && !ALLOWED_POPUPS.test(targetHost))) {
+      console.warn('[Venom Shield] Blocked popunder/ad popup to:', url);
+      return { closed: true, close() {}, focus() {}, blur() {}, document: {}, location: {} };
+    }
+    return realOpen.apply(W, arguments);
+  };
+
+  // 5. INVISIBLE CLICK OVERLAY & CLICK-HIJACK DESTROYER
+  function killClickTraps() {
+    const all = D.querySelectorAll('div, a, span');
+    const vw = W.innerWidth || 1, vh = W.innerHeight || 1;
+    for (const el of all) {
+      if (el.tagName === 'VIDEO' || el.tagName === 'IFRAME') continue;
+      const cs = getComputedStyle(el);
+      if (cs.position === 'fixed' || cs.position === 'absolute') {
+        const z = parseInt(cs.zIndex, 10) || 0;
+        const rect = el.getBoundingClientRect();
+        const coversScreen = (rect.width * rect.height) >= (0.4 * vw * vh);
+        const isTransparent = parseFloat(cs.opacity) <= 0.05 || cs.backgroundColor === 'rgba(0, 0, 0, 0)' || cs.visibility === 'hidden';
+        const hasNoText = !(el.innerText || '').trim();
+
+        // If it's a huge invisible layer floating over the page -> IT'S A CLICK-TRAP!
+        if (z >= 99 && coversScreen && (isTransparent || hasNoText)) {
+          el.remove();
+          console.log('[Venom Shield] Removed invisible click trap overlay');
+        }
+      }
+    }
+  }
+
+  // 6. SCROLL LOCK & BLUR KILLER
+  function unlockPage() {
+    [D.documentElement, D.body].forEach(el => {
+      if (!el) return;
+      if (getComputedStyle(el).overflow === 'hidden') el.style.setProperty('overflow', 'auto', 'important');
+      if (getComputedStyle(el).filter !== 'none') el.style.setProperty('filter', 'none', 'important');
+    });
+  }
+
+  // Periodic cleanups
+  D.addEventListener('DOMContentLoaded', () => {
+    killClickTraps();
+    unlockPage();
+    setInterval(killClickTraps, 1000);
+    setInterval(unlockPage, 1500);
+  });
+})();
